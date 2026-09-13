@@ -48,10 +48,10 @@ running the borrowed record, so the redirect stops in the same call he leaves.
 asks for `chr\<owner>\effect\...`) and where the shot is born. The two kinds of
 shot want opposite owners, measured in game both ways:
 
-| shot kind | owner = donor | owner = Seth |
-|---|---|---|
-| drawn by its class (AnimPath empty) | visual works | no visual |
-| script-driven (AnimPath set) | no visual, no hitbox | hitbox and position work |
+|              shot kind              |    owner = donor     |       owner = Seth       |
+|                                     |                      |                          |
+| drawn by its class (AnimPath empty) |     visual works     |          no visual       |
+|    script-driven (AnimPath set)     | no visual, no hitbox | hitbox and position work |
 
 So the choice is made per shot, reading the SHT at spawn time. For class-drawn
 shots the donor is the owner and the donor is moved to Seth's position for the
@@ -104,7 +104,7 @@ object, so a logic bug shows up on Linux instead of in the game.
 Install by copying `build/SethRuntimeProbe.v4.asi` and its `.ini` next to the
 game executable. The ASI looks for an `.ini` named after itself.
 
-## Exceptions file
+## Exceptions file example
 
     IronMan = skip     steal nothing from this character
     Amaterasu = 0xCE   Seth runs his OWN action 0xCE instead
@@ -120,25 +120,10 @@ the resource paths (`chr\<Name>\...`), not the display name.
 - Bishop T-poses as a donor. Not missing animation data and not a mismatched
   motion-slot pairing. (Dante's T-pose was the prop animation below.)
 - Assists that jump to another action of their own (`0_01`/`1_00` to a
-  follow-up: Wolverine, Leilei, KTho, Neroe, Juri, WL3, Lilithan, Ultro) are not
+  follow-up: Wolverine, King Thor, Ultron) are not
   supported. The borrow ends at the jump, and since Seth keeps his own anmchr
-  during the move, the jump lands on Seth's action with the same id.
-- Donor props do not appear on Seth. A prop is an object bound to the donor's
+  during the move, the jump lands on Seth's action with the same id or leads to nothing.
+- Donor props do not appear properly on Seth. A prop is an object bound to the donor's
   skeleton, not a resource resolved by path, so the projectile trick does not
   apply. Ghost Rider's chain does appear but comes out short, because its length
   comes from a bone chain Seth's skeleton does not have.
-
-## Method
-
-Everything here was measured, not guessed. Three traps cost the most, all three
-the same mistake in different clothes:
-
-- **Confirm object fields in the assembly of the getter/setter, never in the
-  decompiler output.** It cost a wrong vtable base (the DTI vtable is not the
-  object vtable — take the base from the constructor), and a `field1_0x70` that
-  the decompiler shows as a pointer and is an embedded struct.
-- **Count a hooked function's arguments in the caller's assembly.** The path
-  composer takes five and `sShot__spawnShotEx` takes twelve; declaring fewer
-  leaves stack slots holding the hook's own garbage and crashes the game.
-- **The actor holds two copies of almost every resource pointer, and the engine
-  reads only one.** The one that matters is whichever the indexed getter uses.
