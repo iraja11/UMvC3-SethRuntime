@@ -32,7 +32,7 @@ def main():
                'ReadProcessMemory', 'VirtualProtect', 'FlushInstructionCache',
                'DisableThreadLibraryCalls', 'CreateFileA', 'WriteFile', 'CloseHandle',
                'GetModuleHandleExA', 'ReadFile', 'LoadLibraryA', 'GetProcAddress', 'ExitProcess',
-               'VirtualAlloc']
+               'VirtualAlloc', 'MoveFileExA']
     (OUT / 'kernel32.def').write_text('LIBRARY KERNEL32.dll\nEXPORTS\n' + '\n'.join(exports) + '\n')
     run(['llvm-dlltool', '-m', 'i386:x86-64', '-d', OUT / 'kernel32.def', '-l', OUT / 'kernel32.lib'])
 

@@ -19,4 +19,5 @@ API BOOL ReadFile(HANDLE,void *,DWORD,DWORD *,void *);
 API BOOL CloseHandle(HANDLE);
 API BOOL GetModuleHandleExA(DWORD,const char *,HANDLE *);
 API void *VirtualAlloc(void *,U64,DWORD,DWORD);
+API BOOL MoveFileExA(const char *,const char *,DWORD);
 #endif

@@ -123,8 +123,6 @@ the resource paths (`chr\<Name>\...`), not the display name.
   follow-up: Wolverine, King Thor, Ultron) are have inconsistet results and are not
   supported. The borrow ends at the jump, and since Seth keeps his own anmchr
   during the move, the jump lands on Seth's action with the same id, Seth freezing or leads to nothing.
-- Using any copied move with considerable horizontal move may go out of binds disrespecting
-  the stage's limits.
 - Donor props do not appear properly on Seth. A prop is an object bound to the donor's
   skeleton, not a resource resolved by path, so the projectile trick does not
   apply. Ghost Rider's chain does appear but comes out short, because its length

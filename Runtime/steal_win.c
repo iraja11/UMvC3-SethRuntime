@@ -37,6 +37,7 @@
 #define STEAL_ACTOR_REQUEST   0x1318u  /* u32: requested action (deferred request) */
 #define STEAL_ACTOR_FRAME     0x1328u  /* f32: current frame */
 #define STEAL_ACTOR_PENDING   0x14f0u  /* u32: bit 2 = an action change is pending */
+#define STEAL_ACTOR_STATEF    0x14fcu  /* u32: the flags 1_3C sets and 1_3D clears */
 #define STEAL_LATCH_PERIOD    32u      /* one roster sweep every N lookups */
 #define STEAL_GUARD_PERIOD    16u      /* one donor check every N lookups */
 #define STEAL_ENTER_TICKS     600u     /* give up if the action never gets entered */
@@ -105,7 +106,11 @@ static U32 motion_n;
    whole move, so a cancel finds Seth's actions.  The donor's go in only for
    the instant the borrowed script jumps to one of the donor's own actions
    (see goto_window), and come straight back out once the jump has landed. */
-static U64 seth_bank, seth_alt, donor_bank, donor_alt;
+static U64 seth_bank, seth_alt, seth_cmn, donor_bank, donor_alt;
+/* The action id the running borrowed record answers to: STEAL_BORROW_ACTION
+   for the trimmed copy, the donor's own id once the move follows a jump into
+   one of the donor's actions.  See lookup_hook(). */
+static U32 borrow_key;
 static U32 bank_fake;     /* our one-action bank is still installed */
 static U32 window_on;     /* the donor's bank is in the slots right now */
 static StealGoto gotos[STEAL_MAX_GOTOS];
@@ -116,6 +121,9 @@ static U32 anim_null_logged, follow_logged;
 /* Set once the pending-change bit has been seen CLEAR during the borrow, so
    only a fresh request (a cancel) can end it early.  See tick_state(). */
 static U32 pending_armed;
+/* +0x14FC bits the dropped prologue would have cleared (see prologue_clears
+   in steal_core.c).  Cleared by us the moment the move is entered. */
+static U32 prologue_clear;
 /* Action trail: while a donor is latched or a move is running, log every
    action change on Seth.  Of all the log lines, this one has solved the most
    bugs in this file. */
@@ -254,6 +262,56 @@ static U32 saved_weapons_ok;
 #define PROP_SLOTS 512u
 static void *prop_zeros;    /* copy of Seth's prop array, tail zeroed */
 
+/* Class callbacks that can't run with Seth as `this`.
+
+   A donor callback runs on Seth's object, which has Vergil's layout.  That's
+   harmless while the callback sticks to cChr fields, but everything from
+   +0x68F8 on belongs to the class: on Seth it holds Vergil's data.  Zero's
+   callback 1 (uZero__onActionChange_3730, +0xF3730) reads a pointer table at
+   +0x6930..+0x6948 and hands what it finds to uModel__setJointTexture - on Seth
+   that's garbage, and the game crashed the moment the borrowed move started.
+
+   Listed here are the callbacks that touch +0x68F8..+0x7FFF themselves or in a
+   function they call directly, found by walking every uXxx__setup table in
+   Ghidra (86 of 170).  They're engine addresses, not characters: a community
+   character reuses its base class, so it's covered too.  A listed callback
+   is answered by cb_skip(); everything else in the donor's table still runs,
+   which is what brings Ghost Rider's chain and Nova's move along. */
+static const U32 CB_UNSAFE[] = {
+    0x05fe20u, 0x05fe80u, 0x05fed0u, 0x060040u, 0x060390u, 0x0604b0u,
+    0x060520u, 0x060d30u, 0x060d90u, 0x061a80u, 0x06fd60u, 0x070880u,
+    0x072710u, 0x075980u, 0x07a930u, 0x07aba0u, 0x081ac0u, 0x083270u,
+    0x0838b0u, 0x083b40u, 0x083b60u, 0x0877e0u, 0x087850u, 0x0878a0u,
+    0x087950u, 0x0879b0u, 0x090b60u, 0x090b70u, 0x090ba0u, 0x090bb0u,
+    0x092e70u, 0x093c10u, 0x093db0u, 0x095c70u, 0x097d40u, 0x09a590u,
+    0x0a1260u, 0x0a19a0u, 0x0a1a80u, 0x0a1fb0u, 0x0a1fc0u, 0x0a9b10u,
+    0x0a9b70u, 0x0aab20u, 0x0b0f70u, 0x0b13d0u, 0x0b16f0u, 0x0b1b30u,
+    0x0b1d50u, 0x0b5100u, 0x0b53e0u, 0x0b5410u, 0x0b5430u, 0x0b5450u,
+    0x0b5460u, 0x0b9680u, 0x0b9e90u, 0x0b9ee0u, 0x0bb980u, 0x0bc7e0u,
+    0x0bec90u, 0x0bed70u, 0x0c1030u, 0x0c1470u, 0x0c49c0u, 0x0c4fa0u,
+    0x0d2920u, 0x0d4660u, 0x0d7be0u, 0x0d8660u, 0x0da970u, 0x0db220u,
+    0x0db9f0u, 0x0dbf50u, 0x0ddc30u, 0x0ddc40u, 0x0e2670u, 0x0e2770u,
+    0x0e2c70u, 0x0e3020u, 0x0e5f90u, 0x0e8c50u, 0x0e9cc0u, 0x0f0f60u,
+    0x0f3730u, 0x0f66f0u,
+};
+#define CB_MAX 64u
+static U64 cb_table[CB_MAX];   /* the donor's table as Seth sees it */
+
+/* Same signature the 1_106 handler calls with; the 0 goes to the command
+   value, which is what a callback with nothing to report returns. */
+static U64 cb_skip(void *chr, U32 arg, float value, void *caller) {
+    (void)chr; (void)arg; (void)value; (void)caller;
+    return 0;
+}
+
+static int cb_unsafe(U64 fn) {
+    U32 i;
+    if (fn < memory.exe || fn >= memory.exe + 0x1000000) return 0;
+    for (i = 0; i < sizeof(CB_UNSAFE)/sizeof(CB_UNSAFE[0]); i++)
+        if (fn - memory.exe == CB_UNSAFE[i]) return 1;
+    return 0;
+}
+
 static void apply_swap(U64 owner, U64 donor) {
     U32 i;
     U32 n = 0;
@@ -263,8 +321,23 @@ static void apply_swap(U64 owner, U64 donor) {
         rd64(owner + STEAL_ACTOR_CBTABLE, &saved_cbtable) &&
         rd32(donor + STEAL_ACTOR_CBCOUNT, &n) &&
         rd64(donor + STEAL_ACTOR_CBTABLE, &tab) && tab) {
+        U32 skipped = 0;
+        if (n > CB_MAX) n = CB_MAX;
+        for (i = 0; i < n; i++) {
+            U64 fn = 0;
+            if (!rd64(tab + (U64)i * 8, &fn) || !fn || cb_unsafe(fn)) {
+                if (fn) skipped++;
+                fn = (U64)&cb_skip;
+            }
+            cb_table[i] = fn;
+        }
         write32(owner + STEAL_ACTOR_CBCOUNT, n);
-        write64(owner + STEAL_ACTOR_CBTABLE, tab);
+        write64(owner + STEAL_ACTOR_CBTABLE, (U64)cb_table);
+        if (skipped && !(SethStealStats.logged & 0x800u)) {
+            SethStealStats.logged |= 0x800u;
+            log_text("CLASSE: callbacks do doador que leem a cauda do objeto foram pulados\r\n");
+            log_value("  pulados", (U64)skipped);
+        }
     } else {
         saved_cbtable = 0;              /* not swapped, so nothing to restore */
     }
@@ -665,6 +738,7 @@ static int follow_up(U64 cur) {
     if (steal_donor_record(&memory, donor_bank, cur, &act, &dur, &size) != STEAL_OK) return 0;
     borrow_record = cur;
     borrow_frames = dur;
+    borrow_key = act;
     bank_seth();
     load_gotos_at(cur, size);
     pending_armed = 0;
@@ -729,9 +803,12 @@ static void begin_borrow(void) {
     {
         U64 fake = 0;
         U32 kept = 0, trimmed = 0, props = 0;
-        int t = trim_buf ? steal_trim(&memory, borrow_donor, trim_buf, TRIM_CAP,
-                                      (U64)trim_buf, &fake, &kept, &trimmed, &props)
-                         : STEAL_BAD_DATA;
+        int t;
+        prologue_clear = 0;
+        t = trim_buf ? steal_trim(&memory, borrow_donor, trim_buf, TRIM_CAP,
+                                  (U64)trim_buf, &fake, &kept, &trimmed, &props,
+                                  &prologue_clear)
+                     : STEAL_BAD_DATA;
         if (t != STEAL_OK || !fake) {
             latched_donor = 0;
             SethStealStats.aborts++;
@@ -767,6 +844,8 @@ static void begin_borrow(void) {
            the donor's hyper, or nothing at all. */
         if (!rd64(borrow_owner + STEAL_BANK_ANMCHR, &seth_bank)) seth_bank = 0;
         if (!rd64(borrow_owner + STEAL_ACTOR_ANMCHR, &seth_alt)) seth_alt = 0;
+        if (!rd64(borrow_owner + STEAL_ACTOR_ANMCMN, &seth_cmn)) seth_cmn = 0;
+        borrow_key = STEAL_BORROW_ACTION;
         /* ...and the donor's, for the moments the borrowed script jumps into
            one of the donor's own actions. */
         if (!rd64(borrow_donor + STEAL_BANK_ANMCHR, &donor_bank)) donor_bank = 0;
@@ -789,7 +868,7 @@ static void begin_borrow(void) {
        This mirrors what the native GoToAction does, bit 2 at +0x14f0 included. */
     if (rd32(borrow_owner + STEAL_ACTOR_PENDING, &flags))
         write32(borrow_owner + STEAL_ACTOR_PENDING, flags | 2u);
-    write32(borrow_owner + STEAL_ACTOR_REQUEST, STEAL_ASSIST_ACTION);
+    write32(borrow_owner + STEAL_ACTOR_REQUEST, STEAL_BORROW_ACTION);
     /* The frame is left alone: the trimmed record already starts at the move. */
 
     latched_donor = 0;              /* one use per steal */
@@ -854,7 +933,7 @@ static void tick_state(void) {
            donor's, so that jump lands. */
         U32 pend = 0;
         int consumed = rd32(borrow_owner + STEAL_ACTOR_REQUEST, &pend) &&
-                       pend != STEAL_ASSIST_ACTION;
+                       pend != STEAL_BORROW_ACTION;
         if (bank_fake && (consumed || cur == borrow_record)) {
             bank_fake = 0;
             if (goto_n && (float)gotos[0].frame <= GOTO_LEAD) bank_donor();
@@ -862,7 +941,18 @@ static void tick_state(void) {
             log_once(5, "BANCO: anmchr do Seth devolvido ao consumir o pedido\r\n");
         }
         if (cur == borrow_record) {
+            U32 st = 0;
             SethStealStats.state = ST_BORROWED;
+            /* What the prologue's `1_3D` would have done on its way in.  Without
+               it the stage wall stays off for the whole move (bit 0x2000). */
+            if (prologue_clear && rd32(borrow_owner + STEAL_ACTOR_STATEF, &st) && (st & prologue_clear)) {
+                write32(borrow_owner + STEAL_ACTOR_STATEF, st & ~prologue_clear);
+                if (!(SethStealStats.logged & 0x1000u)) {
+                    SethStealStats.logged |= 0x1000u;
+                    log_text("PAREDE: bits do prologo cortado desligados (+0x14FC)\r\n");
+                    log_value("  bits", (U64)(st & prologue_clear));
+                }
+            }
             log_once(4, "ENTROU: script do doador, sem prologo; anmchr devolvido\r\n");
             return;
         }
@@ -1496,6 +1586,67 @@ static int spawn_install(void) {
     return 1;
 }
 
+/* ------------------------------------------------ action lookup by id
+
+   The script cursor (cParameterTrack at actor +0x1348) doesn't just keep the
+   record pointer: every GoTo Frame (`0_02`, `0_04`, `0_1C`) goes through
+   cParameterTrack__resolveEntries (+0x13540), which looks the CURRENT action id
+   up again in the actor's banks (+0x1368, then anmcmn at +0x1360) with
+   sMvc3SceneUI__findInArrayKey0_offset (+0x2952E0) and replaces the record.
+
+   By then Seth's own anmchr is back in the slots, and it has no action 0xD5.
+   The lookup returned 0, the record pointer went to 0 and the game crashed -
+   measured live on Wolverine, whose hit confirm is a `0_02` at f16.  With the
+   old id (0xAC) the same lookup quietly found Seth's OWN 0xAC, which is why
+   Wolverine used to finish the move as Vergil's assist instead of crashing.
+
+   So both call sites in resolveEntries come here.  A lookup against one of
+   Seth's banks for the id the borrowed record runs under answers with that
+   record; everything else goes to the game untouched. */
+typedef void *(*NativeLookup)(void *, U32);
+#define LOOKUP_RVA 0x2952e0u
+static const EflSite lookup_sites[] = {
+    {0x01356c, {0xe8,0x6f,0x1d,0x28,0x00}},
+    {0x013591, {0xe8,0x4a,0x1d,0x28,0x00}},
+};
+#define LOOKUP_SITE_COUNT (sizeof(lookup_sites)/sizeof(lookup_sites[0]))
+static DWORD lookup_protection[LOOKUP_SITE_COUNT];
+static U32 lookup_logged;
+
+static void *lookup_hook(void *bank, U32 key) {
+    NativeLookup native = (NativeLookup)(memory.exe + LOOKUP_RVA);
+    void *r = native(bank, key);
+    if (SethStealStats.state == ST_IDLE || !borrow_owner || !borrow_record || key != borrow_key)
+        return r;
+    if (!bank || ((U64)bank != seth_bank && (U64)bank != seth_alt && (U64)bank != seth_cmn))
+        return r;
+    if ((U64)r != borrow_record && lookup_logged < 4) {
+        lookup_logged++;
+        log_text("BUSCA: GoTo Frame refez a busca da acao no banco do Seth; devolvido o registro emprestado\r\n");
+        log_value("  acao", (U64)key);
+    }
+    return (void *)borrow_record;
+}
+
+static int lookup_install(void) {
+    U8 b[5], *relay = 0;
+    DWORD old;
+    U32 i, j;
+    for (i = 0; i < LOOKUP_SITE_COUNT; i++) {
+        if (!read_memory(0, memory.exe + lookup_sites[i].rva, b, 5)) return 0;
+        for (j = 0; j < 5; j++) if (b[j] != lookup_sites[i].original[j]) return 0;
+    }
+    for (U64 off = 0x2000000; off < 0x10000000; off += 0x10000) {
+        relay = VirtualAlloc((void *)(memory.exe + off), 0x1000, 0x3000, 4);
+        if (relay) break;
+    }
+    if (!relay) return 0;
+    spawn_stub(relay, (void *)&lookup_hook);
+    if (!VirtualProtect(relay, 0x1000, 0x20, &old) ||
+        !FlushInstructionCache(GetCurrentProcess(), relay, 0x20)) return 0;
+    return spawn_patch(lookup_sites, LOOKUP_SITE_COUNT, relay, lookup_protection);
+}
+
 /* ---------------------------------------------------------------- resolver */
 
 static int is_owner_motion_l1(U64 resource) {
@@ -1572,8 +1723,17 @@ static void attach(HANDLE module) {
     U32 n, i;
 
     n = GetModuleFileNameA(module, path, sizeof(path));
-    if (n && n < sizeof(path)-5) {
+    if (n && n < sizeof(path)-14) {
+        char prev[1040];
+        U32 k;
         path[n++]='.'; path[n++]='l'; path[n++]='o'; path[n++]='g'; path[n]=0;
+        /* The previous session's log is kept as .log.anterior: a crash is
+           usually followed by a relaunch, and the relaunch used to wipe the
+           one log that explained the crash. */
+        for (k = 0; k < n; k++) prev[k] = path[k];
+        prev[k++]='.'; prev[k++]='a'; prev[k++]='n'; prev[k++]='t'; prev[k++]='e';
+        prev[k++]='r'; prev[k++]='i'; prev[k++]='o'; prev[k++]='r'; prev[k]=0;
+        MoveFileExA(path, prev, 1 /* MOVEFILE_REPLACE_EXISTING */);
         log_file = CreateFileA(path, 0x40000000, 3, 0, 2, 0x80, 0);
         path[n-4] = '.'; path[n-3] = 'i'; path[n-2] = 'n'; path[n-1] = 'i';
         rules_load(path);
@@ -1628,6 +1788,8 @@ static void attach(HANDLE module) {
         log_value("  callsites (3_30 + 3_31 + 3_32)", (U64)spawn_installed);
     }
     else log_text("WARNING: nao consegui interceptar o nascimento do projetil\r\n");
+    if (lookup_install()) log_text("BUSCA READY: GoTo Frame acha o registro emprestado\r\n");
+    else log_text("WARNING: busca de acao NAO interceptada; GoTo Frame em golpe copiado pode crashar\r\n");
     if (compose_install()) log_text("CAMINHO READY: composicao de caminho interceptada\r\n");
     else log_text("WARNING: composicao de caminho NAO interceptada\r\n");
     if (efl_install()) log_text("EFL READY: consultas de efeito redirecionaveis\r\n");

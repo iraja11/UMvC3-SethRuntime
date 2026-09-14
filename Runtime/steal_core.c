@@ -248,6 +248,28 @@ static void put32(U8 *p, U32 v) {
 }
 static void put64(U8 *p, U64 v) { put32(p, (U32)v); put32(p+4, (U32)(v>>32)); }
 
+/* Frame jumps inside the move carry an ABSOLUTE frame of the record: the third
+   value of `0_02`/`0_04 GoTo Frame On Condition` and the first of `0_1C GoTo
+   Frame` go straight to the context's GoToFrame (anmchrCmd0_interpreter,
+   +0x100DE0).  Shifting the sub-blocks down without shifting these made every
+   jump land `corte` frames late.  Wolverine's hit confirm at f22 jumps to 29,
+   which in the copy is the frame of the `1_00` itself: the jump fired before
+   the goto window could open, and Seth ran his OWN 0xC5 - frozen in the air.
+   A target inside the dropped prologue goes to frame 0. */
+static void shift_frame_jump(U8 *rec, U32 size, U32 co, U32 corte) {
+    U32 code, np, slot, at;
+    if (co + 16 > size || u32(rec+co) != 0) return;
+    code = u32(rec+co+4);
+    if (code == 0x02 || code == 0x04) slot = 2;
+    else if (code == 0x1c) slot = 0;
+    else return;
+    np = u32(rec+co+8);
+    if (np <= slot || np > 31 || co + 16 + np*8 > size) return;
+    if (u32(rec + co + 16 + slot*4) == 6) return;      /* float tag: not a frame */
+    at = co + 16 + np*4 + slot*4;
+    put32(rec + at, u32(rec + at) >= corte ? u32(rec + at) - corte : 0);
+}
+
 /* Where does the move REALLY start for this donor?  The assist prologue plays
    its animations from bank lmt0, so the first sub-block that plays something
    from any other bank is where the move begins. */
@@ -334,11 +356,39 @@ static U32 corte_do_golpe(const U8 *rec, U32 size) {
     return anim;
 }
 
+/* State bits the dropped prologue clears on its way in.
+
+   Every factory assist has `1_3D State/Invincibility (Disable) [8192]` at f1.
+   `1_3D` clears bits of +0x14FC, and bit 0x2000 there is what the stage wall
+   clamp (FUN_1400502c0, +0x502C0) checks before doing anything: the assist
+   flies in from off screen, so the wall is off until the prologue turns it
+   back on.  Cutting the prologue left the wall off for the whole borrowed move
+   - measured live, +0x14FC = 0x2000 from the first frame of every borrow and
+   0 on Seth's own actions - and Morrigan's move, which travels far, carried
+   Seth straight through the corner and snapped him back when it ended. */
+static U32 prologue_clears(const U8 *rec, U32 size, U32 po) {
+    U32 ncmd, k, out = 0;
+    if (po + 16 > size) return 0;
+    ncmd = u32(rec + po + 4);
+    if (ncmd > 256 || po + 16 + ncmd*8 > size) return 0;
+    for (k = 0; k < ncmd; k++) {
+        U32 co = po + u32(rec + po + 16 + k*8), np;
+        if (co + 24 > size || u32(rec+co) != 1) continue;
+        np = u32(rec+co+8);
+        if (!np || np > 31 || co + 16 + np*8 > size) continue;
+        if (u32(rec + co + 16) == 6) continue;             /* float tag */
+        if (u32(rec+co+4) == 0x3d) out |= u32(rec + co + 16 + np*4);
+        if (u32(rec+co+4) == 0x3c) out &= ~u32(rec + co + 16 + np*4);
+    }
+    return out;
+}
+
 int steal_trim(const ProbeMemory *m, U64 donor, U8 *buf, U32 cap, U64 base,
-               U64 *out_resource, U32 *kept, U32 *frames, U32 *props_dropped) {
+               U64 *out_resource, U32 *kept, U32 *frames, U32 *props_dropped,
+               U32 *prologue_clear) {
     U64 res, data, rec;
     U8 h[16], e[8];
-    U32 n, i, off, my_off = 0, next_off = 0, size, subs, dur, k, w, corte, dropped = 0;
+    U32 n, i, off, my_off = 0, next_off = 0, size, subs, dur, k, w, corte, dropped = 0, cleared = 0;
     U8 *data_out, *rec_out;
 
     if (cap < STEAL_DATA_AT + STEAL_RECORD_AT + 64) return STEAL_BAD_DATA;
@@ -378,7 +428,7 @@ int steal_trim(const ProbeMemory *m, U64 donor, U8 *buf, U32 cap, U64 base,
     /* Synthetic anmchr header: same magic and version, a single action. */
     for (i = 0; i < 16; i++) data_out[i] = h[i];
     put32(data_out + 8, 1);
-    put32(data_out + 16, STEAL_ASSIST_ACTION);
+    put32(data_out + 16, STEAL_BORROW_ACTION);
     put32(data_out + 20, STEAL_RECORD_AT);
 
     /* The record is copied whole; its internal offsets are relative to itself. */
@@ -396,7 +446,11 @@ int steal_trim(const ProbeMemory *m, U64 donor, U8 *buf, U32 cap, U64 base,
     for (i = 0, w = 0; i < subs; i++) {
         U8 *pair = rec_out + STEAL_REC_HEADER + i*8;
         U32 fr = u32(pair), po = u32(pair+4), ncmd, c;
-        if (fr < corte) continue;
+        if (fr < corte) {
+            U32 v = prologue_clears(rec_out, size, po);
+            cleared |= v;
+            continue;
+        }
         if (po + 16 > size) return STEAL_BAD_DATA;
         /* The frame is stored TWICE - in the pair and at +0 of the sub-block
            itself - and in every factory arc the two agree.  Shifting only the
@@ -421,6 +475,7 @@ int steal_trim(const ProbeMemory *m, U64 donor, U8 *buf, U32 cap, U64 base,
                 U8 *dst = rec_out + po + 16 + c*8, j;
                 for (j = 0; j < 8; j++) dst[j] = ent[j];
             }
+            shift_frame_jump(rec_out, size, co, corte);
             c++;
         }
         /* A sub-block that only had prop animation in it goes away entirely,
@@ -442,6 +497,7 @@ int steal_trim(const ProbeMemory *m, U64 donor, U8 *buf, U32 cap, U64 base,
     if (kept) *kept = k;
     if (frames) *frames = dur - corte;
     if (props_dropped) *props_dropped = dropped;
+    if (prologue_clear) *prologue_clear = cleared;
     return STEAL_OK;
 }
 

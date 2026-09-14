@@ -50,6 +50,15 @@
 #define STEAL_OWNER_ANMTDOWN  "chr\\SethTE\\anmtdown"
 
 #define STEAL_ASSIST_ACTION   0x0acu  /* Assist Alpha */
+/* The id the trimmed copy runs under on Seth.  NOT the donor's 0xAC: the engine
+   treats a character running 0xAC-0xAE as an assist, whoever he is.  The one
+   that showed in game is uCharacterPost__applyCameraRelativeFighterCorrection
+   (+0x5D480), which returns early for those ids - no screen limit for the whole
+   move, and Seth snapped back into the screen when it ended (Morrigan).  0xD5 is
+   free in Seth's anmchr and only compared in license/unlock code.  It must also
+   differ from the entry actions (0xBE and the old 0x64/0xCE/0xCF): a request
+   equal to the current action is ignored (uActorGameModel__commitAnimationRequest). */
+#define STEAL_BORROW_ACTION   0x0d5u
 #define STEAL_FIRST_FRAME     6u      /* the assist entrance usually takes f0-f5 */
 #define STEAL_MAX_ACTIONS     4096u
 #define STEAL_MAX_ROSTER      16u
@@ -137,10 +146,13 @@ int steal_prepare(const ProbeMemory *m, U64 donor, StealResult *out);
 #define STEAL_REC_HEADER  24u     /* +0 count, +4 duration, pairs from here */
 
 /* `base` is the address the buffer will live at inside the game process.
-   *out_resource receives the resource object to install, and *props_dropped
-   how many prop animation commands were left out. */
+   *out_resource receives the resource object to install, *props_dropped how
+   many prop animation commands were left out, and *prologue_clear the state
+   bits (+0x14FC) that the dropped prologue's `1_3D` commands would have
+   cleared - the caller has to clear them itself when the move starts. */
 int steal_trim(const ProbeMemory *m, U64 donor, U8 *buf, U32 cap, U64 base,
-               U64 *out_resource, U32 *kept, U32 *frames, U32 *props_dropped);
+               U64 *out_resource, U32 *kept, U32 *frames, U32 *props_dropped,
+               U32 *prologue_clear);
 
 
 /* --------------------------------------------- jumps to the donor's actions
