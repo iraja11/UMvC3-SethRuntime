@@ -49,8 +49,9 @@ asks for `chr\<owner>\effect\...`) and where the shot is born. The two kinds of
 shot want opposite owners, measured in game both ways:
 
 |              shot kind              |    owner = donor     |       owner = Seth       |
-|                                     |                      |                          |
+
 | drawn by its class (AnimPath empty) |     visual works     |          no visual       |
+
 |    script-driven (AnimPath set)     | no visual, no hitbox | hitbox and position work |
 
 So the choice is made per shot, reading the SHT at spawn time. For class-drawn
@@ -95,7 +96,6 @@ atkinfo, shot list or callback table.
     probe_core.c/.h   motion resolver shared with earlier versions
     build_v4.py       builds; does not install
     validate_steal.py validates the selector against a live game, read-only
-    legacy/           superseded versions, kept for reference
 
 Build with `python3 build_v4.py` (clang targeting `x86_64-pc-windows-msvc`,
 plus `lld-link`). The core is compiled first under ASan/UBSan as a native
@@ -117,13 +117,17 @@ the resource paths (`chr\<Name>\...`), not the display name.
 - Iron Man's UniBeam spawns with a hitbox but draws nothing. The class builds
   the beam from `chr\IronMan\effect\mod\%04d` and every lookup succeeds, so it
   is not a missing resource.
-- Bishop T-poses as a donor. Not missing animation data and not a mismatched
-  motion-slot pairing. (Dante's T-pose was the prop animation below.)
+- Seth T-poses with Bishop & Dante as a donors. Not missing animation data and not a mismatched
+  motion-slot pairing.
 - Assists that jump to another action of their own (`0_01`/`1_00` to a
-  follow-up: Wolverine, King Thor, Ultron) are not
+  follow-up: Wolverine, King Thor, Ultron) are have inconsistet results and are not
   supported. The borrow ends at the jump, and since Seth keeps his own anmchr
-  during the move, the jump lands on Seth's action with the same id or leads to nothing.
+  during the move, the jump lands on Seth's action with the same id, Seth freezing or leads to nothing.
+- Using any copied move with considerable horizontal move may go out of binds disrespecting
+  the stage's limits.
 - Donor props do not appear properly on Seth. A prop is an object bound to the donor's
   skeleton, not a resource resolved by path, so the projectile trick does not
   apply. Ghost Rider's chain does appear but comes out short, because its length
   comes from a bone chain Seth's skeleton does not have.
+- Even ignoring props and its animations, Hsien-ko still crashes the game when .
+
